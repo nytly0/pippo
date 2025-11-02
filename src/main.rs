@@ -22,7 +22,6 @@ use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 // use std::cell::UnsafeCell;
 use std::{time::Duration, time::Instant};
 mod utils;
-use utils::map; // include your API key
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum UiState {
@@ -39,8 +38,8 @@ fn main() -> anyhow::Result<()> {
   initialize();
 
   let peripherals = Peripherals::take().unwrap();
-  let sysloop = EspSystemEventLoop::take()?;
-  let nvs = EspDefaultNvsPartition::take()?;
+  let system_event_loop = EspSystemEventLoop::take()?;
+  let non_volatile_storage = EspDefaultNvsPartition::take()?;
 
   let button = PinDriver::input(peripherals.pins.gpio4)?;
   // Initialize I2C SSD1306 Display
@@ -93,7 +92,7 @@ fn main() -> anyhow::Result<()> {
   // }))?;
 
   // wifi.start()?;
-  // display.init().unwrap();
+  display.init().unwrap();
 
   // wifi.connect()?;
 
@@ -119,12 +118,12 @@ fn main() -> anyhow::Result<()> {
   let mut last = Instant::now();
   let mut blinking = false;
   let mut blink_delay =
-    Duration::from_millis(rand::rng().random_range(4000..7000));
-  // let mut in_main_screen = false;
-  // let mut button_interaction = false;
+    Duration::from_millis(rand::rng().random_range(3000..7000));
+  let mut idle_delay = Duration::from_millis(rand::rng().random_range(7000..10000));
+  let mut idle = false;
   let mut ui_state = UiState::Face;
 
-  // Button handling state
+  // Button handling states
   let mut option_index: u8 = 0;
   let mut btn_down = false;               // debounced current state
   let mut btn_raw_last = false;           // last raw read
@@ -162,17 +161,7 @@ fn main() -> anyhow::Result<()> {
       {
         long_fired = true;
         // Selection or navigation on long press
-        ui_state = match ui_state {
-          UiState::Face => UiState::Menu, // long press from face opens menu
-          UiState::Menu => match option_index {
-            0 => UiState::Settings,
-            1 => UiState::Status,
-            2 => UiState::Exit,
-            _ => UiState::Menu,
-          },
-          // long press on any sub-screen returns to face
-          _ => UiState::Face,
-        };
+        handle_long_press(&mut ui_state, option_index);
       }
 
       // Falling edge (released)
@@ -180,26 +169,13 @@ fn main() -> anyhow::Result<()> {
         btn_down = false;
         // Short press actions (only if long didn't fire)
         if !long_fired {
-          ui_state = match ui_state {
-            UiState::Menu => {
-              option_index = (option_index + 1) % 3; // cycle options
-              UiState::Menu
-            }
-            // short press on sub-screen goes back to Menu
-            UiState::Settings | UiState::Status | UiState::Exit => UiState::Menu,
-            // short press on face does nothing
-            UiState::Face => UiState::Face,
-          };
+          handle_short_press(&mut ui_state, &mut option_index);
         }
       }
     }
 
     // LED reflects button state (pressed -> low)
-    if btn_down {
-      led.set_low().unwrap();
-    } else {
-      led.set_high().unwrap();
-    }
+    handle_led(&mut led, btn_down);
 
     // Render by state
     match ui_state {
@@ -210,7 +186,9 @@ fn main() -> anyhow::Result<()> {
           text_style_face,
           &mut last,
           &mut blinking,
+          &mut idle,
           &mut blink_delay,
+          &mut idle_delay,
         );
       }
       UiState::Menu => {
@@ -242,6 +220,41 @@ fn main() -> anyhow::Result<()> {
 
     FreeRtos::delay_ms(20);
   }
+}
+
+fn handle_long_press(ui_state: &mut UiState, option_index: u8) {
+    *ui_state = match *ui_state {
+      UiState::Face => UiState::Menu, // long press from face opens menu
+      UiState::Menu => match option_index {
+        0 => UiState::Settings,
+        1 => UiState::Status,
+        2 => UiState::Exit,
+        _ => UiState::Menu,
+      },
+      // long press on any sub-screen returns to face
+      _ => UiState::Face,
+    };
+}
+
+fn handle_short_press(ui_state: &mut UiState, option_index: &mut u8) {
+    *ui_state = match *ui_state {
+        UiState::Menu => {
+          *option_index = (*option_index + 1) % 3; // cycle options
+          UiState::Menu
+        }
+        // short press on sub-screen goes back to Menu
+        UiState::Settings | UiState::Status | UiState::Exit => UiState::Menu,
+        // short press on face does nothing
+        UiState::Face => UiState::Face,
+      };
+}
+
+fn handle_led(led: &mut PinDriver<'_, esp_idf_hal::gpio::Gpio2, esp_idf_hal::gpio::Output>, btn_down: bool) {
+    if btn_down {
+      led.set_low().unwrap();
+    } else {
+      led.set_high().unwrap();
+    }
 }
 
 fn initialize() {
@@ -300,15 +313,22 @@ fn draw_neutral_face(
   text_style: embedded_graphics::mono_font::MonoTextStyle<'_, BinaryColor>,
   last: &mut Instant,
   blinking: &mut bool,
+  idle: &mut bool,
   blink_delay: &mut Duration,
+  idle_delay: &mut Duration,
 ) {
   let elapsed = last.elapsed();
+
+  const BLINK_EYES: &str = "-      -";
+  const NORMAL_EYES: &str = ".      .";
+  const MOUTH: &str = "   --   ";
+  // add idle expression
 
   if !*blinking && elapsed >= *blink_delay {
     // close eyes
     display.clear(BinaryColor::Off).unwrap();
     Text::with_baseline(
-      "-      -",
+      BLINK_EYES,
       Point::new(20, 14),
       text_style,
       Baseline::Top,
@@ -316,7 +336,7 @@ fn draw_neutral_face(
     .draw(display)
     .unwrap();
     Text::with_baseline(
-      "   --   ",
+      MOUTH,
       Point::new(20, 34),
       text_style,
       Baseline::Top,
@@ -327,10 +347,12 @@ fn draw_neutral_face(
     *blinking = true;
     *last = Instant::now();
   } else if *blinking && elapsed >= Duration::from_millis(100) {
+
+
     // open eyes
     display.clear(BinaryColor::Off).unwrap();
     Text::with_baseline(
-      ".      .",
+      NORMAL_EYES,
       Point::new(20, 14),
       text_style,
       Baseline::Top,
@@ -338,7 +360,7 @@ fn draw_neutral_face(
     .draw(display)
     .unwrap();
     Text::with_baseline(
-      "   --   ",
+      MOUTH,
       Point::new(20, 34),
       text_style,
       Baseline::Top,
@@ -349,6 +371,8 @@ fn draw_neutral_face(
     *blinking = false;
     *blink_delay = Duration::from_millis(rand::rng().random_range(4000..7000));
     *last = Instant::now();
+    // add idle 
+
   }
 }
 
