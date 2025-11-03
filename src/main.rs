@@ -32,8 +32,11 @@ enum UiState {
   Exit,
 }
 
-
-
+// PINS
+// LED: GPIO2
+// BUTTON: GPIO23
+// I2C SDA: GPIO21
+// I2C SCL: GPIO22
 fn main() -> anyhow::Result<()> {
   initialize();
 
@@ -41,7 +44,10 @@ fn main() -> anyhow::Result<()> {
   let system_event_loop = EspSystemEventLoop::take()?;
   let non_volatile_storage = EspDefaultNvsPartition::take()?;
 
-  let button = PinDriver::input(peripherals.pins.gpio4)?;
+  let mut button = PinDriver::input(peripherals.pins.gpio23)?;
+
+  // Enable internal pull-up resistor on button pin (Thanks Google)
+  button.set_pull(esp_idf_hal::gpio::Pull::Up)?;
   // Initialize I2C SSD1306 Display
   let mut display = {
     let config = I2cConfig::new().baudrate(100.kHz().into());
@@ -55,7 +61,7 @@ fn main() -> anyhow::Result<()> {
   };
   // let mut wifi = BlockingWifi::wrap(
   //   EspWifi::new(peripherals.modem, sysloop.clone(), Some(nvs))?,
-  //   sysloop,
+  //   sysloop,   
   // )?;
   let mut led = PinDriver::output(peripherals.pins.gpio2)?;
   // let timer_driver = LedcTimerDriver::new(
@@ -119,24 +125,25 @@ fn main() -> anyhow::Result<()> {
   let mut blinking = false;
   let mut blink_delay =
     Duration::from_millis(rand::rng().random_range(3000..7000));
-  let mut idle_delay = Duration::from_millis(rand::rng().random_range(7000..10000));
+  let mut idle_delay =
+    Duration::from_millis(rand::rng().random_range(7000..10000));
   let mut idle = false;
   let mut ui_state = UiState::Face;
 
   // Button handling states
   let mut option_index: u8 = 0;
-  let mut btn_down = false;               // debounced current state
-  let mut btn_raw_last = false;           // last raw read
-  let mut btn_changed_at = Instant::now();// debounce timer
-  let mut btn_pressed_at = Instant::now();// press start time
-  let mut long_fired = false;             // long press fired once
+  let mut btn_down = false; // debounced current state
+  let mut btn_raw_last = false; // last raw read
+  let mut btn_changed_at = Instant::now(); // debounce timer
+  let mut btn_pressed_at = Instant::now(); // press start time
+  let mut long_fired = false; // long press fired once
 
   const DEBOUNCE_MS: u64 = 30;
   const LONG_PRESS_MS: u64 = 1600;
 
   loop {
     // Read raw button
-    let raw = button.is_high();
+    let raw = button.is_low();
     let now = Instant::now();
 
     // Debounce
@@ -144,7 +151,8 @@ fn main() -> anyhow::Result<()> {
       btn_raw_last = raw;
       btn_changed_at = now;
     }
-    let stable = now.duration_since(btn_changed_at) >= Duration::from_millis(DEBOUNCE_MS);
+    let stable =
+      now.duration_since(btn_changed_at) >= Duration::from_millis(DEBOUNCE_MS);
 
     // Edge detection on stable transitions
     if stable {
@@ -156,8 +164,10 @@ fn main() -> anyhow::Result<()> {
       }
 
       // Long press while held
-      if btn_down && !long_fired
-        && now.duration_since(btn_pressed_at) >= Duration::from_millis(LONG_PRESS_MS)
+      if btn_down
+        && !long_fired
+        && now.duration_since(btn_pressed_at)
+          >= Duration::from_millis(LONG_PRESS_MS)
       {
         long_fired = true;
         // Selection or navigation on long press
@@ -169,7 +179,7 @@ fn main() -> anyhow::Result<()> {
         btn_down = false;
         // Short press actions (only if long didn't fire)
         if !long_fired {
-          handle_short_press(&mut ui_state, &mut option_index);
+          handle_short_press(ui_state, &mut option_index);
         }
       }
     }
@@ -196,9 +206,15 @@ fn main() -> anyhow::Result<()> {
         if !btn_down {
           display.clear(BinaryColor::Off).unwrap();
           match option_index {
-            0 => main_screen(&mut display, text_style_settings, true,  false, false),
-            1 => main_screen(&mut display, text_style_settings, false, true,  false),
-            2 => main_screen(&mut display, text_style_settings, false, false, true),
+            0 => {
+              main_screen(&mut display, text_style_settings, true, false, false)
+            }
+            1 => {
+              main_screen(&mut display, text_style_settings, false, true, false)
+            }
+            2 => {
+              main_screen(&mut display, text_style_settings, false, false, true)
+            }
             _ => unreachable!(),
           }
           display.flush().unwrap();
@@ -223,38 +239,43 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn handle_long_press(ui_state: &mut UiState, option_index: u8) {
-    *ui_state = match *ui_state {
-      UiState::Face => UiState::Menu, // long press from face opens menu
+    match *ui_state {
+      UiState::Face => *ui_state = UiState::Menu, // long press from face opens menu
       UiState::Menu => match option_index {
-        0 => UiState::Settings,
-        1 => UiState::Status,
-        2 => UiState::Exit,
-        _ => UiState::Menu,
+        0 => *ui_state = UiState::Settings,
+        1 => *ui_state = UiState::Status,
+        2 => *ui_state = UiState::Exit,
+        _ => *ui_state = UiState::Menu,
       },
       // long press on any sub-screen returns to face
-      _ => UiState::Face,
+      _ => *ui_state = UiState::Face,
     };
 }
 
-fn handle_short_press(ui_state: &mut UiState, option_index: &mut u8) {
-    *ui_state = match *ui_state {
+fn handle_short_press(ui_state: UiState, option_index: &mut u8) {
+    match ui_state {
         UiState::Menu => {
           *option_index = (*option_index + 1) % 3; // cycle options
           UiState::Menu
         }
         // short press on sub-screen goes back to Menu
-        UiState::Settings | UiState::Status | UiState::Exit => UiState::Menu,
+        UiState::Settings | UiState::Status | UiState::Exit => {
+          UiState::Menu
+        }
         // short press on face does nothing
         UiState::Face => UiState::Face,
       };
 }
 
-fn handle_led(led: &mut PinDriver<'_, esp_idf_hal::gpio::Gpio2, esp_idf_hal::gpio::Output>, btn_down: bool) {
-    if btn_down {
-      led.set_low().unwrap();
-    } else {
-      led.set_high().unwrap();
-    }
+fn handle_led(
+  led: &mut PinDriver<'_, esp_idf_hal::gpio::Gpio2, esp_idf_hal::gpio::Output>,
+  btn_down: bool,
+) {
+  if btn_down {
+    led.set_high().unwrap();
+  } else {
+    led.set_low().unwrap();
+  }
 }
 
 fn initialize() {
@@ -335,20 +356,13 @@ fn draw_neutral_face(
     )
     .draw(display)
     .unwrap();
-    Text::with_baseline(
-      MOUTH,
-      Point::new(20, 34),
-      text_style,
-      Baseline::Top,
-    )
-    .draw(display)
-    .unwrap();
+    Text::with_baseline(MOUTH, Point::new(20, 34), text_style, Baseline::Top)
+      .draw(display)
+      .unwrap();
     display.flush().unwrap();
     *blinking = true;
     *last = Instant::now();
   } else if *blinking && elapsed >= Duration::from_millis(100) {
-
-
     // open eyes
     display.clear(BinaryColor::Off).unwrap();
     Text::with_baseline(
@@ -359,20 +373,14 @@ fn draw_neutral_face(
     )
     .draw(display)
     .unwrap();
-    Text::with_baseline(
-      MOUTH,
-      Point::new(20, 34),
-      text_style,
-      Baseline::Top,
-    )
-    .draw(display)
-    .unwrap();
+    Text::with_baseline(MOUTH, Point::new(20, 34), text_style, Baseline::Top)
+      .draw(display)
+      .unwrap();
     display.flush().unwrap();
     *blinking = false;
     *blink_delay = Duration::from_millis(rand::rng().random_range(4000..7000));
     *last = Instant::now();
-    // add idle 
-
+    // add idle
   }
 }
 
@@ -407,32 +415,96 @@ fn draw_happy_face(
 }
 
 fn draw_settings_screen(
-  display: &mut Ssd1306<I2CInterface<I2cDriver<'_>>, DisplaySize128x64, ssd1306::mode::BufferedGraphicsMode<DisplaySize128x64>>,
+  display: &mut Ssd1306<
+    I2CInterface<I2cDriver<'_>>,
+    DisplaySize128x64,
+    ssd1306::mode::BufferedGraphicsMode<DisplaySize128x64>,
+  >,
   text_style: embedded_graphics::mono_font::MonoTextStyle<'_, BinaryColor>,
 ) {
-  Text::with_baseline("Settings", Point::new(10, 10), text_style, Baseline::Top).draw(display).unwrap();
-  Text::with_baseline("Short: Back", Point::new(10, 26), text_style, Baseline::Top).draw(display).unwrap();
-  Text::with_baseline("Long: Face", Point::new(10, 34), text_style, Baseline::Top).draw(display).unwrap();
+  Text::with_baseline(
+    "Settings",
+    Point::new(10, 10),
+    text_style,
+    Baseline::Top,
+  )
+  .draw(display)
+  .unwrap();
+  Text::with_baseline(
+    "Short: Back",
+    Point::new(10, 26),
+    text_style,
+    Baseline::Top,
+  )
+  .draw(display)
+  .unwrap();
+  Text::with_baseline(
+    "Long: Face",
+    Point::new(10, 34),
+    text_style,
+    Baseline::Top,
+  )
+  .draw(display)
+  .unwrap();
   display.flush().unwrap();
 }
 
 fn draw_status_screen(
-  display: &mut Ssd1306<I2CInterface<I2cDriver<'_>>, DisplaySize128x64, ssd1306::mode::BufferedGraphicsMode<DisplaySize128x64>>,
+  display: &mut Ssd1306<
+    I2CInterface<I2cDriver<'_>>,
+    DisplaySize128x64,
+    ssd1306::mode::BufferedGraphicsMode<DisplaySize128x64>,
+  >,
   text_style: embedded_graphics::mono_font::MonoTextStyle<'_, BinaryColor>,
 ) {
-  Text::with_baseline("Status", Point::new(10, 10), text_style, Baseline::Top).draw(display).unwrap();
-  Text::with_baseline("Short: Back", Point::new(10, 26), text_style, Baseline::Top).draw(display).unwrap();
-  Text::with_baseline("Long: Face", Point::new(10, 34), text_style, Baseline::Top).draw(display).unwrap();
+  Text::with_baseline("Status", Point::new(10, 10), text_style, Baseline::Top)
+    .draw(display)
+    .unwrap();
+  Text::with_baseline(
+    "Short: Back",
+    Point::new(10, 26),
+    text_style,
+    Baseline::Top,
+  )
+  .draw(display)
+  .unwrap();
+  Text::with_baseline(
+    "Long: Face",
+    Point::new(10, 34),
+    text_style,
+    Baseline::Top,
+  )
+  .draw(display)
+  .unwrap();
   display.flush().unwrap();
 }
 
 fn draw_exit_screen(
-  display: &mut Ssd1306<I2CInterface<I2cDriver<'_>>, DisplaySize128x64, ssd1306::mode::BufferedGraphicsMode<DisplaySize128x64>>,
+  display: &mut Ssd1306<
+    I2CInterface<I2cDriver<'_>>,
+    DisplaySize128x64,
+    ssd1306::mode::BufferedGraphicsMode<DisplaySize128x64>,
+  >,
   text_style: embedded_graphics::mono_font::MonoTextStyle<'_, BinaryColor>,
 ) {
-  Text::with_baseline("Exit", Point::new(10, 10), text_style, Baseline::Top).draw(display).unwrap();
-  Text::with_baseline("Short: Back", Point::new(10, 26), text_style, Baseline::Top).draw(display).unwrap();
-  Text::with_baseline("Long: Face", Point::new(10, 34), text_style, Baseline::Top).draw(display).unwrap();
+  Text::with_baseline("Exit", Point::new(10, 10), text_style, Baseline::Top)
+    .draw(display)
+    .unwrap();
+  Text::with_baseline(
+    "Short: Back",
+    Point::new(10, 26),
+    text_style,
+    Baseline::Top,
+  )
+  .draw(display)
+  .unwrap();
+  Text::with_baseline(
+    "Long: Face",
+    Point::new(10, 34),
+    text_style,
+    Baseline::Top,
+  )
+  .draw(display)
+  .unwrap();
   display.flush().unwrap();
 }
-
