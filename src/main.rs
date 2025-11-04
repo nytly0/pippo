@@ -2,14 +2,13 @@ use anyhow::{self};
 use chrono::{DateTime, Local, Utc};
 use embedded_graphics::{
   mono_font::{
-    ascii::{FONT_5X8, FONT_7X13_BOLD},
-    iso_8859_10::FONT_10X20,
     MonoTextStyleBuilder,
   },
   pixelcolor::BinaryColor,
   prelude::*,
   primitives::{
-    Arc, CornerRadii, Line, PrimitiveStyle, Rectangle, RoundedRectangle,
+    Arc as GraphicsArc, CornerRadii, Line, PrimitiveStyle, Rectangle,
+    RoundedRectangle,
   },
   text::{Baseline, Text},
 };
@@ -37,7 +36,7 @@ use esp_idf_svc::{
   sntp::EspSntp,
 };
 use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
-// use std::cell::UnsafeCell;
+use std::sync::{Arc, Mutex};
 use std::{time::Duration, time::Instant};
 mod utils;
 
@@ -80,6 +79,8 @@ fn main() -> anyhow::Result<()> {
   };
 
   let mut led = PinDriver::output(peripherals.pins.gpio2)?;
+  let buzzer = Arc::new(Mutex::new(PinDriver::output(peripherals.pins.gpio5)?));
+
   let mut motion_sensor = PinDriver::input(peripherals.pins.gpio15)?;
   motion_sensor
     .set_interrupt_type(esp_idf_hal::gpio::InterruptType::AnyEdge)?;
@@ -150,6 +151,26 @@ fn main() -> anyhow::Result<()> {
     |request| -> Result<(), anyhow::Error> {
       let html = index_html();
       let mut response = request.into_ok_response()?;
+      response.write(html.as_bytes())?;
+      Ok(())
+    },
+  )?;
+  let buzzer_clone = Arc::clone(&buzzer);
+  http_server.fn_handler(
+    "/buzz",
+    Method::Get,
+    move |request| -> Result<(), anyhow::Error> {
+      let html = buzz_html();
+      let mut response = request.into_ok_response()?;
+      {
+        let mut buzzer_lock = buzzer_clone.lock().unwrap();
+        buzzer_lock.set_high().unwrap();
+      }
+      FreeRtos::delay_ms(200);
+      {
+        let mut buzzer_lock = buzzer_clone.lock().unwrap();
+        buzzer_lock.set_low().unwrap();
+      }
       response.write(html.as_bytes())?;
       Ok(())
     },
@@ -622,4 +643,7 @@ fn draw_wifi_icon(
 
 fn index_html() -> String {
   include_str!("../web/index.html").to_string()
+}
+fn buzz_html() -> String {
+  include_str!("../web/buzz.html").to_string()
 }
